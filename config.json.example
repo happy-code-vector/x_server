@@ -1,0 +1,33 @@
+{
+  "databases": [
+    {
+      "id": 1,
+      "host": "localhost",
+      "port": 5432,
+      "name": "twitter_data_1",
+      "user": "postgres",
+      "password": "your-password",
+      "is_active": true
+    },
+    {
+      "id": 2,
+      "host": "localhost",
+      "port": 5432,
+      "name": "twitter_data_2",
+      "user": "postgres",
+      "password": "your-password",
+      "is_active": false
+    },
+    {
+      "id": 3,
+      "host": "localhost",
+      "port": 5432,
+      "name": "twitter_data_3",
+      "user": "postgres",
+      "password": "your-password",
+      "is_active": false
+    }
+  ],
+  "current_db_index": 0,
+  "db_size_limit_mb": 1000
+}

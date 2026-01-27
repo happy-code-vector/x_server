@@ -1,0 +1,43 @@
+{
+  "local_databases": [
+    {
+      "id": 1,
+      "host": "localhost",
+      "port": 5432,
+      "name": "twitter_data_1",
+      "user": "postgres",
+      "password": "your-local-password",
+      "is_active": true
+    },
+    {
+      "id": 2,
+      "host": "localhost",
+      "port": 5432,
+      "name": "twitter_data_2",
+      "user": "postgres",
+      "password": "your-local-password",
+      "is_active": false
+    },
+    {
+      "id": 3,
+      "host": "localhost",
+      "port": 5432,
+      "name": "twitter_data_3",
+      "user": "postgres",
+      "password": "your-local-password",
+      "is_active": false
+    }
+  ],
+  "online_database": {
+    "host": "your-online-host.com",
+    "port": 5432,
+    "name": "twitter_data_online",
+    "user": "your-online-username",
+    "password": "your-online-password"
+  },
+  "migration_settings": {
+    "batch_size": 1000,
+    "enable_logging": true,
+    "skip_duplicates": true
+  }
+}
