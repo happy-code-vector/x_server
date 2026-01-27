@@ -340,7 +340,6 @@ async def run_hourly_alerts():
             
         except KeyboardInterrupt:
             logger.info("Discord alert service stopped by user")
-            break
         except Exception as e:
             logger.error(f"Error in hourly alert loop: {e}")
             # Wait 5 minutes before retrying on error
