@@ -334,22 +334,17 @@ async def run_hourly_alerts():
         
         logger.info("Starting hourly Discord alert service...")
         
-        while True:
-            try:
-                # Send status alert
-                await alert_service.send_status_alert()
-                
-                # Wait 1 hour (3600 seconds)
-                logger.info("Waiting 1 hour for next alert...")
-                await asyncio.sleep(3600)
-                
-            except KeyboardInterrupt:
-                logger.info("Discord alert service stopped by user")
-                break
-            except Exception as e:
-                logger.error(f"Error in hourly alert loop: {e}")
-                # Wait 5 minutes before retrying on error
-                await asyncio.sleep(300)
+        try:
+            # Send status alert
+            await alert_service.send_status_alert()
+            
+        except KeyboardInterrupt:
+            logger.info("Discord alert service stopped by user")
+            break
+        except Exception as e:
+            logger.error(f"Error in hourly alert loop: {e}")
+            # Wait 5 minutes before retrying on error
+            await asyncio.sleep(300)
                 
     except ValueError as e:
         logger.error(f"Configuration error: {e}")
