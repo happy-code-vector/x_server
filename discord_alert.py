@@ -12,7 +12,6 @@ import glob
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
 from dotenv import load_dotenv
-from database_manager import DatabaseManager
 from logger import logger
 
 # Load environment variables
@@ -22,14 +21,15 @@ load_dotenv()
 class DiscordAlertService:
     """Handles Discord webhook alerts for database status"""
     
-    def __init__(self, webhook_url: str = None, username: str = "Kevin-J"):
+    def __init__(self, webhook_url: str = None, username: str = "Kevin-J", api_base_url: str = None):
         # Load webhook URL from environment if not provided
         self.webhook_url = webhook_url or os.getenv("DISCORD_WEBHOOK_URL")
         if not self.webhook_url:
             raise ValueError("Discord webhook URL not provided. Set DISCORD_WEBHOOK_URL environment variable or pass webhook_url parameter.")
         
         self.username = username
-        self.db_manager = DatabaseManager()
+        # Default to localhost API server
+        self.api_base_url = api_base_url or os.getenv("API_BASE_URL", "http://localhost:8000")
         
     async def get_recent_errors(self, hours: int = 1) -> List[str]:
         """Get recent errors from error log files within the specified hours"""
@@ -188,29 +188,62 @@ class DiscordAlertService:
             }
     
     async def get_database_status(self) -> Dict[str, Any]:
-        """Get current database status information"""
+        """Get current database status information from health API"""
         try:
-            current_db = await self.db_manager.get_current_database()
+            health_url = f"{self.api_base_url}/health"
             
-            # Get database size in GB
-            size_mb = await self.db_manager.check_database_size(current_db)
-            size_gb = round(size_mb / 1024, 2)
-            
-            # Get tweet count
-            tweet_count = await self.db_manager.get_table_count(current_db, "tweets")
-            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(health_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    if response.status == 200:
+                        health_data = await response.json()
+                        
+                        # Extract database status from health response
+                        if health_data.get("status") == "healthy" and "current_database_stats" in health_data:
+                            db_stats = health_data["current_database_stats"]
+                            
+                            return {
+                                "database_name": db_stats.get("name", "unknown"),
+                                "tweet_count": db_stats.get("tweet_count", 0),
+                                "size_gb": db_stats.get("size_gb", 0.0),
+                                "size_mb": db_stats.get("size_mb", 0.0),
+                                "capacity_used_percent": db_stats.get("capacity_used_percent", 0.0),
+                                "size_limit_mb": health_data.get("databases", {}).get("size_limit_mb", 0)
+                            }
+                        else:
+                            logger.warning(f"Health API returned unhealthy status: {health_data}")
+                            return {
+                                "database_name": "API Error",
+                                "tweet_count": 0,
+                                "size_gb": 0.0,
+                                "size_mb": 0.0,
+                                "capacity_used_percent": 0.0,
+                                "size_limit_mb": 0
+                            }
+                    else:
+                        logger.error(f"Health API returned status {response.status}: {await response.text()}")
+                        return {
+                            "database_name": f"API Error ({response.status})",
+                            "tweet_count": 0,
+                            "size_gb": 0.0,
+                            "size_mb": 0.0,
+                            "capacity_used_percent": 0.0,
+                            "size_limit_mb": 0
+                        }
+                        
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout connecting to health API at {health_url}")
             return {
-                "database_name": current_db['name'],
-                "tweet_count": tweet_count,
-                "size_gb": size_gb,
-                "size_mb": round(size_mb, 2),
-                "capacity_used_percent": round((size_mb / self.db_manager.db_size_limit_mb) * 100, 2),
-                "size_limit_mb": self.db_manager.db_size_limit_mb
+                "database_name": "API Timeout",
+                "tweet_count": 0,
+                "size_gb": 0.0,
+                "size_mb": 0.0,
+                "capacity_used_percent": 0.0,
+                "size_limit_mb": 0
             }
         except Exception as e:
-            logger.error(f"Error getting database status: {e}")
+            logger.error(f"Error getting database status from health API: {e}")
             return {
-                "database_name": "unknown",
+                "database_name": "API Connection Failed",
                 "tweet_count": 0,
                 "size_gb": 0.0,
                 "size_mb": 0.0,
@@ -299,10 +332,7 @@ class DiscordAlertService:
         try:
             logger.info("Generating database status alert...")
             
-            # Initialize databases if needed
-            await self.db_manager.initialize_all_databases()
-            
-            # Get current database status
+            # Get current database status from health API
             db_status = await self.get_database_status()
             
             # Get recent errors from logs
