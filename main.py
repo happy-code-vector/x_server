@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from typing import List, Optional, Union
@@ -145,7 +145,7 @@ async def global_exception_handler(_, exc):
 
 
 @app.post("/api/data/receive", response_model=DataReceiveResponse)
-async def receive_data(tweets: List[TweetData]):
+async def receive_data(request: Request, tweets: List[TweetData]):
     """
     Receive and store tweet data (array of tweets)
 
@@ -154,7 +154,17 @@ async def receive_data(tweets: List[TweetData]):
     - Stores tweets in PostgreSQL with full-text search indexing
     - Supports multiple database servers with automatic failover
     - Returns success with count of inserted tweets and current database info
+    - **SECURITY: Only accepts requests from localhost (127.0.0.1 or ::1)**
     """
+    # Security check: Only accept requests from localhost
+    client_host = request.client.host if request.client else None
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        logger.warning(f"Rejected data receive request from non-localhost IP: {client_host}")
+        raise HTTPException(
+            status_code=403,
+            detail=f"Access denied: This endpoint only accepts requests from localhost"
+        )
+
     try:
         if not tweets:
             logger.warning("Received empty tweet array")
