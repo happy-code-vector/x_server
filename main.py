@@ -483,11 +483,16 @@ async def health_check():
 if __name__ == "__main__":
     server_host = os.getenv("SERVER_HOST", "0.0.0.0")
     server_port = int(os.getenv("SERVER_PORT", "8000"))
+    workers = int(os.getenv("WORKERS", "4"))
+    reload = os.getenv("RELOAD", "false").lower() == "true"
+    limit_concurrency = int(os.getenv("LIMIT_CONCURRENCY", "100"))
 
     uvicorn.run(
         "main:app",
         host=server_host,
         port=server_port,
-        reload=True,
+        workers=workers,
+        reload=reload,
+        limit_concurrency=limit_concurrency,
         log_level="info"
     )
