@@ -328,6 +328,18 @@ class DatabaseManager:
                     seen_ids.add(tweet['tweet_id'])
                     all_tweets.append(tweet)
 
+        # For multi-word keywords, filter to only include tweets with the full phrase
+        keyword_stripped = keyword.strip()
+        if ' ' in keyword_stripped:
+            origin_len = len(all_tweets)
+            # Multi-word search - filter by exact phrase match (case-insensitive)
+            keyword_lower = keyword_stripped.lower()
+            all_tweets = [
+                tweet for tweet in all_tweets
+                if keyword_lower in tweet['text'].lower()
+            ]
+            logger.info(f"Multi-word search '{keyword}': filtered from {origin_len} to {len(all_tweets)} results to phrase matches")
+
         # Sort by created_at descending
         all_tweets.sort(key=lambda x: x['created_at'], reverse=True)
 
