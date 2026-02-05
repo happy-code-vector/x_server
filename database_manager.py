@@ -5,7 +5,7 @@ import asyncpg
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import QueuePool
 import os
 from pathlib import Path
 from logger import logger
@@ -20,6 +20,16 @@ class DatabaseManager:
         self.databases = self.config.get("databases", [])
         self.current_db_index = self.config.get("current_db_index", 0)
         self.db_size_limit_mb = self.config.get("db_size_limit_mb", 1000)
+
+        # Connection pool settings
+        self.pool_size = int(os.getenv("DB_POOL_SIZE", "5"))
+        self.max_overflow = int(os.getenv("DB_MAX_OVERFLOW", "10"))
+        self.pool_timeout = int(os.getenv("DB_POOL_TIMEOUT", "30"))
+        self.pool_recycle = int(os.getenv("DB_POOL_RECYCLE", "3600"))
+
+        # Maintain connection pools for each database
+        self.engines = {}
+        self.asyncpg_pools = {}
 
     def _load_config(self) -> dict:
         """Load database configuration from JSON file"""
@@ -41,39 +51,66 @@ class DatabaseManager:
         """Generate async PostgreSQL connection string"""
         return f"postgresql+asyncpg://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['name']}"
 
-    async def check_database_size(self, db_config: dict) -> float:
-        """Check current database size in MB"""
-        conn_string = self._get_async_connection_string(db_config)
-        engine = create_async_engine(conn_string, poolclass=NullPool)
+    def _get_engine(self, db_config: dict):
+        """Get or create a connection pool engine for the database"""
+        db_key = f"{db_config['host']}:{db_config['port']}/{db_config['name']}"
 
-        try:
-            async with engine.connect() as conn:
-                result = await conn.execute(
-                    text(f"""
-                        SELECT pg_database_size('{db_config['name']}') / 1024 / 1024 as size_mb
-                    """)
-                )
-                size_mb = float(result.scalar())
-                return size_mb
-        finally:
-            await engine.dispose()
+        if db_key not in self.engines:
+            self.engines[db_key] = create_async_engine(
+                self._get_async_connection_string(db_config),
+                poolclass=QueuePool,
+                pool_size=self.pool_size,
+                max_overflow=self.max_overflow,
+                pool_timeout=self.pool_timeout,
+                pool_recycle=self.pool_recycle
+            )
+            logger.info(f"Created connection pool for {db_config['name']} "
+                       f"(pool_size={self.pool_size}, max_overflow={self.max_overflow})")
 
-    async def get_table_count(self, db_config: dict, table_name: str = "tweets") -> int:
-        """Get total count of records in a table"""
-        try:
-            conn = await asyncpg.connect(
+        return self.engines[db_key]
+
+    async def _get_asyncpg_pool(self, db_config: dict):
+        """Get or create an asyncpg connection pool for the database"""
+        db_key = f"{db_config['host']}:{db_config['port']}/{db_config['name']}"
+
+        if db_key not in self.asyncpg_pools:
+            self.asyncpg_pools[db_key] = await asyncpg.create_pool(
                 host=db_config['host'],
                 port=db_config['port'],
                 user=db_config['user'],
                 password=db_config['password'],
-                database=db_config['name']
+                database=db_config['name'],
+                min_size=self.pool_size,
+                max_size=self.pool_size + self.max_overflow,
+                timeout=self.pool_timeout,
+                command_timeout=60
             )
-            
-            try:
+            logger.info(f"Created asyncpg pool for {db_config['name']} "
+                       f"(min_size={self.pool_size}, max_size={self.pool_size + self.max_overflow})")
+
+        return self.asyncpg_pools[db_key]
+
+    async def check_database_size(self, db_config: dict) -> float:
+        """Check current database size in MB"""
+        engine = self._get_engine(db_config)
+
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                text(f"""
+                    SELECT pg_database_size('{db_config['name']}') / 1024 / 1024 as size_mb
+                """)
+            )
+            size_mb = float(result.scalar())
+            return size_mb
+
+    async def get_table_count(self, db_config: dict, table_name: str = "tweets") -> int:
+        """Get total count of records in a table"""
+        try:
+            pool = await self._get_asyncpg_pool(db_config)
+
+            async with pool.acquire() as conn:
                 result = await conn.fetchval(f"SELECT COUNT(*) FROM {table_name}")
                 return result or 0
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"Error getting count from {db_config['name']}: {e}")
             return 0
@@ -111,86 +148,82 @@ class DatabaseManager:
 
     async def initialize_database(self, db_config: dict):
         """Initialize database with required table and full-text search index"""
-        conn_string = self._get_async_connection_string(db_config)
-        engine = create_async_engine(conn_string, poolclass=NullPool)
+        engine = self._get_engine(db_config)
 
-        try:
-            async with engine.connect() as conn:
-                # Create tweets table
-                await conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS tweets (
-                        tweet_id TEXT PRIMARY KEY,
-                        user_id TEXT,
-                        username TEXT,
-                        display_name TEXT,
-                        text TEXT,
-                        created_at TIMESTAMPTZ,
-                        tweet_url TEXT,
-                        hashtags TEXT[],
-                        followers_count INT4,
-                        following_count INT4,
-                        verified BOOL,
-                        text_tsv TSVECTOR,
-                        language TEXT,
-                        retweet_count INT4,
-                        reply_count INT4,
-                        quote_count INT4,
-                        like_count INT4,
-                        bookmark_count INT4,
-                        view_count INT8,
-                        conversation_id TEXT,
-                        user_blue_verified BOOL,
-                        user_location TEXT,
-                        user_description TEXT,
-                        profile_image_url TEXT,
-                        cover_picture_url TEXT,
-                        media TEXT[]
-                    )
-                """))
+        async with engine.connect() as conn:
+            # Create tweets table
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS tweets (
+                    tweet_id TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    username TEXT,
+                    display_name TEXT,
+                    text TEXT,
+                    created_at TIMESTAMPTZ,
+                    tweet_url TEXT,
+                    hashtags TEXT[],
+                    followers_count INT4,
+                    following_count INT4,
+                    verified BOOL,
+                    text_tsv TSVECTOR,
+                    language TEXT,
+                    retweet_count INT4,
+                    reply_count INT4,
+                    quote_count INT4,
+                    like_count INT4,
+                    bookmark_count INT4,
+                    view_count INT8,
+                    conversation_id TEXT,
+                    user_blue_verified BOOL,
+                    user_location TEXT,
+                    user_description TEXT,
+                    profile_image_url TEXT,
+                    cover_picture_url TEXT,
+                    media TEXT[]
+                )
+            """))
 
-                # Create full-text search index using text_tsv column
-                await conn.execute(text("""
-                    CREATE INDEX IF NOT EXISTS idx_tweets_text_search
-                    ON tweets USING gin(text_tsv)
-                """))
+            # Create full-text search index using text_tsv column
+            await conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS idx_tweets_text_search
+                ON tweets USING gin(text_tsv)
+            """))
 
-                # Create index on username for faster searches
-                await conn.execute(text("""
-                    CREATE INDEX IF NOT EXISTS idx_tweets_username
-                    ON tweets(username)
-                """))
+            # Create index on username for faster searches
+            await conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS idx_tweets_username
+                ON tweets(username)
+            """))
 
-                # Create index on created_at for sorting
-                await conn.execute(text("""
-                    CREATE INDEX IF NOT EXISTS idx_tweets_created_at
-                    ON tweets(created_at DESC)
-                """))
+            # Create index on created_at for sorting
+            await conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS idx_tweets_created_at
+                ON tweets(created_at DESC)
+            """))
 
-                # Create trigger function to update text_tsv automatically
-                await conn.execute(text("""
-                    CREATE OR REPLACE FUNCTION tweets_text_tsv_trigger() RETURNS trigger AS $$
-                    BEGIN
-                        NEW.text_tsv := to_tsvector('english', COALESCE(NEW.text, ''));
-                        RETURN NEW;
-                    END
-                    $$ LANGUAGE plpgsql
-                """))
+            # Create trigger function to update text_tsv automatically
+            await conn.execute(text("""
+                CREATE OR REPLACE FUNCTION tweets_text_tsv_trigger() RETURNS trigger AS $$
+                BEGIN
+                    NEW.text_tsv := to_tsvector('english', COALESCE(NEW.text, ''));
+                    RETURN NEW;
+                END
+                $$ LANGUAGE plpgsql
+            """))
 
-                # Create trigger to call the function on INSERT and UPDATE
-                await conn.execute(text("""
-                    DROP TRIGGER IF EXISTS tweets_text_tsv_update ON tweets
-                """))
-                await conn.execute(text("""
-                    CREATE TRIGGER tweets_text_tsv_update
-                    BEFORE INSERT OR UPDATE ON tweets
-                    FOR EACH ROW
-                    EXECUTE FUNCTION tweets_text_tsv_trigger()
-                """))
+            # Create trigger to call the function on INSERT and UPDATE
+            await conn.execute(text("""
+                DROP TRIGGER IF EXISTS tweets_text_tsv_update ON tweets
+            """))
+            await conn.execute(text("""
+                CREATE TRIGGER tweets_text_tsv_update
+                BEFORE INSERT OR UPDATE ON tweets
+                FOR EACH ROW
+                EXECUTE FUNCTION tweets_text_tsv_trigger()
+            """))
 
-                await conn.commit()
-                logger.info(f"Database {db_config['name']} initialized successfully")
-        finally:
-            await engine.dispose()
+            await conn.commit()
+            logger.info(f"Database {db_config['name']} initialized successfully")
 
     async def insert_tweet(self, tweet_data: list) -> tuple[int, int]:
         """
@@ -210,24 +243,9 @@ class DatabaseManager:
             return 0, 0
 
         try:
-            conn = await asyncpg.connect(
-                host=current_db['host'],
-                port=current_db['port'],
-                user=current_db['user'],
-                password=current_db['password'],
-                database=current_db['name']
-            )
+            pool = await self._get_asyncpg_pool(current_db)
 
-            try:
-                # Check how many tweets already exist before insertion
-                # tweet_ids = [tweet['tweet_id'] for tweet in tweet_data]
-                # existing_tweets = await conn.fetch(
-                #     "SELECT tweet_id FROM tweets WHERE tweet_id = ANY($1)",
-                #     tweet_ids
-                # )
-                # existing_ids = {row['tweet_id'] for row in existing_tweets}
-                # conflict_count = len(existing_ids)
-
+            async with pool.acquire() as conn:
                 # Use executemany for batch insertion
                 # Convert camelCase JSON fields to snake_case database columns
                 # text_tsv is automatically populated by the trigger
@@ -276,18 +294,13 @@ class DatabaseManager:
                     ]
                 )
 
-                # inserted_count = len(tweet_data) - conflict_count
-                # logger.info(f"Batch insert: {inserted_count} inserted, {conflict_count} conflicts out of {len(tweet_data)} total")
-                # return inserted_count, conflict_count
                 logger.info(f"Successfully batch inserted {len(tweet_data)} tweets")
                 return len(tweet_data), 0
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"Error inserting {len(tweet_data)} tweets: {e}")
-            
+
             with open(f"{tweet_data[0]['tweet_id']}.json", 'w', encoding='utf-8') as f:
-                json.dump(tweet_data, f, indent= 2)
+                json.dump(tweet_data, f, indent=2)
 
             return 0, len(tweet_data)
 
@@ -322,18 +335,10 @@ class DatabaseManager:
 
     async def _search_single_database(self, db_config: dict, keyword: str, limit: int) -> List[dict]:
         """Search a single database for keyword"""
-        conn_string = self._get_async_connection_string(db_config)
-
         try:
-            conn = await asyncpg.connect(
-                host=db_config['host'],
-                port=db_config['port'],
-                user=db_config['user'],
-                password=db_config['password'],
-                database=db_config['name']
-            )
+            pool = await self._get_asyncpg_pool(db_config)
 
-            try:
+            async with pool.acquire() as conn:
                 query = """
                     SELECT tweet_id, user_id, username, display_name, text, created_at, tweet_url,
                            hashtags, followers_count, following_count, verified,
@@ -348,8 +353,6 @@ class DatabaseManager:
                 rows = await conn.fetch(query, keyword, limit)
 
                 return [dict(row) for row in rows]
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"Error searching database {db_config['name']}: {e}")
             return []
